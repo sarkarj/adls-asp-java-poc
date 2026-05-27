@@ -57,6 +57,16 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Set startup command
+        uses: azure/cli@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az webapp config set \
+              --name ${{ env.AZURE_WEBAPP_NAME }} \
+              --resource-group rg-adls-asp-poc \
+              --startup-file "java -jar /home/site/wwwroot/app.jar"
+
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
