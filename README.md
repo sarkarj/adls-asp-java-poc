@@ -1,5 +1,5 @@
 # ADLS Gen2 → Azure App Service File Transfer PoC
-### Java 21 · Managed Identity · OIDC · Zero Secrets
+### Java 21 · Managed Identity · OIDC · Zero Secrets · Zero Hardcoded IDs
 
 ![Build](https://img.shields.io/badge/build-passing-brightgreen)
 ![Java](https://img.shields.io/badge/Java-21-orange)
@@ -17,10 +17,13 @@
 | **Auth** | System-Assigned Managed Identity — zero credentials, zero secrets anywhere |
 | **Deploy** | GitHub Actions with OIDC federated credentials — no service principal secrets |
 | **Language** | Java 21 — virtual threads, records, fail-fast validation |
+| **Build** | GitHub Actions builds + deploys — no Java or Maven needed locally |
 | **Rebuild Time** | < 15 minutes from scratch (repo + Java code retained) |
 | **Cost** | ~$0.018/hr on B1 — teardown stops all billing instantly |
 
-> **Proven:** Full ADLS Gen2 → App Service connectivity, MSI auth, parameterized file transfer, production-grade CI/CD pipeline.
+> **Proven:** Full ADLS Gen2 → App Service connectivity, MSI auth,
+> parameterized file transfer, production-grade CI/CD pipeline.
+> Safe to make repo public — zero IDs, zero secrets hardcoded anywhere.
 
 ---
 
@@ -79,14 +82,14 @@
 
 ## 🎯 Objective
 
-Prove end-to-end secure file transfer between **Azure Data Lake Storage Gen2** and **Azure App Service** using:
+Prove end-to-end secure file transfer between **Azure Data Lake Storage Gen2**
+and **Azure App Service** using:
 
 - **Managed Identity (MSI)** — eliminates all credential management
 - **Java 21** — modern language features, production-grade patterns
 - **GitHub Actions + OIDC** — zero-secret CI/CD pipeline
 - **Principle of Least Privilege** — Storage Blob Data Reader only
-
-This PoC validates the connectivity and security pattern before building full file transfer implementations.
+- **Zero hardcoded IDs** — all values derived dynamically at runtime
 
 ---
 
@@ -101,7 +104,7 @@ GitHub Actions
     ▼
 Azure Active Directory
     │  Validates: issuer + subject + audience
-    │  subject = repo:sarkarj/adls-asp-java-poc:ref:refs/heads/main
+    │  subject = repo:<owner>/<repo>:ref:refs/heads/main
     ▼
 Temporary Access Token (deploy scope only)
     │
@@ -123,6 +126,7 @@ ADLS Gen2 (Storage Blob Data Reader)
 | Zero secrets in code | All config via `requireEnv()` | Prevents accidental exposure |
 | Zero secrets in GitHub | OIDC — IDs only, no passwords | No blast radius if repo leaked |
 | Zero secrets in App Settings | MSI handles auth entirely | No rotation risk |
+| Zero hardcoded IDs in README | All derived from `az login` | Safe to make repo public |
 | ManagedIdentityCredential direct | Skips 6-provider chain | Faster cold start on App Service |
 | Lazy ADLS client init | Built on first HTTP request | Server starts before any Azure calls |
 | TLS 1.2 minimum | Enforced at storage account level | Blocks obsolete protocols |
@@ -139,48 +143,56 @@ ADLS Gen2 (Storage Blob Data Reader)
 
 ## 📋 Prerequisites
 
-Before the 15-minute rebuild, ensure you have:
+```
+✅ Azure CLI     → brew install azure-cli
+✅ GitHub CLI    → brew install gh
+✅ Git           → pre-installed on Mac
+✅ Azure Pay-As-You-Go account  → portal.azure.com
+✅ GitHub repo cloned           → github.com/<your-username>/adls-asp-java-poc
+✅ gh authenticated             → gh auth login
+✅ az authenticated             → az login
+```
 
-```
-✅ Azure CLI installed      → brew install azure-cli
-✅ GitHub CLI installed     → brew install gh
-✅ Java 21 installed        → brew install openjdk@21
-✅ Maven installed          → brew install maven
-✅ Azure Pay-As-You-Go      → portal.azure.com
-✅ GitHub repo cloned       → github.com/sarkarj/adls-asp-java-poc
-✅ gh authenticated         → gh auth login
-✅ az authenticated         → az login
-```
+> Java 21 and Maven are NOT required locally.
+> GitHub Actions builds and deploys everything on ubuntu-latest runners.
 
 ---
 
 ## ⚠️ Rebuild Considerations
 
-> Read this before starting if rebuilding after a teardown.
+> Read this section before starting if rebuilding after a teardown.
 
 ### Service Principal Already Exists
 After `az group delete`, the SP `sp-github-deploy-poc` remains in Azure AD.
 `az ad sp create-for-rbac` will fail on rebuild. **Delete it first:**
 
 ```bash
-# Check if SP exists
-az ad sp list --display-name sp-github-deploy-poc --query "[0].appId" -o tsv
+# Set variables first (see Phase 1)
+# Then check and delete if SP exists
+SP_EXISTS=$(az ad sp list \
+  --display-name sp-github-deploy-poc \
+  --query "[0].appId" -o tsv)
 
-# If it returns an App ID — delete it before Phase 7
-az ad app delete \
-  --id $(az ad sp list --display-name sp-github-deploy-poc --query "[0].appId" -o tsv)
+if [ -n "$SP_EXISTS" ]; then
+  echo "SP exists — deleting before rebuild..."
+  az ad app delete --id $SP_EXISTS
+  echo "SP deleted — safe to proceed"
+else
+  echo "No existing SP found — safe to proceed"
+fi
 ```
 
 ### Resource Providers Persist
-`Microsoft.Storage`, `Microsoft.Web`, `Microsoft.ManagedIdentity` remain registered
-after teardown — no action needed. Phase 1 includes a safety check anyway.
+`Microsoft.Storage`, `Microsoft.Web`, `Microsoft.ManagedIdentity` stay registered
+after teardown. Phase 1 includes a safety check regardless.
 
 ### B1 Linux Quota Persists
-Quota approved at subscription level — survives teardown. `centralus` remains available.
+Quota approved at subscription level — survives teardown.
+`centralus` remains available.
 
 ### GitHub Secrets Persist
-All 6 secrets remain in the repo after teardown — no action needed unless
-Subscription ID or Tenant ID changes.
+All 6 secrets remain in the repo after teardown.
+Only `AZURE_CLIENT_ID` needs updating if SP was deleted and recreated.
 
 ---
 
@@ -191,26 +203,54 @@ Subscription ID or Tenant ID changes.
 
 ---
 
-### Phase 1 · Azure Login + Provider Safety Check (1 min)
+### Phase 1 · Azure Login + Set Variables (1 min)
 
 ```bash
-az login --tenant "9ffea5dd-3a0c-4a40-b755-398c3d380b50"
-az account set --subscription "b4000e1c-6776-4c86-be94-e40611ec1852"
-az account show --query "{Name:name, State:state}" -o table
+# Login — browser handles identity
+az login
 
-# Register providers — safe to run even if already registered
+# Derive ALL IDs from login context — zero hardcoding
+export TENANT_ID=$(az account show --query tenantId -o tsv)
+export SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+export ACCOUNT_EMAIL=$(az account show --query user.name -o tsv)
+export RESOURCE_GROUP="rg-adls-asp-poc"
+export STORAGE_ACCOUNT="adlspocstore001"
+export CONTAINER_NAME="raw-data"
+export WEBAPP_NAME="webapp-adls-poc"
+export ASP_NAME="asp-adls-poc"
+export SP_NAME="sp-github-deploy-poc"
+export GITHUB_REPO="sarkarj/adls-asp-java-poc"
+
+# Verify login + print derived values
+az account show --query "{Name:name, State:state}" -o table
+echo "---"
+echo "TENANT_ID       : $TENANT_ID"
+echo "SUBSCRIPTION_ID : $SUBSCRIPTION_ID"
+echo "ACCOUNT_EMAIL   : $ACCOUNT_EMAIL"
+
+# Provider safety check
 az provider register --namespace Microsoft.Storage
 az provider register --namespace Microsoft.Web
 az provider register --namespace Microsoft.ManagedIdentity
 
-# Verify all registered
-az provider show --namespace Microsoft.Storage --query "registrationState" -o tsv
-az provider show --namespace Microsoft.Web --query "registrationState" -o tsv
-az provider show --namespace Microsoft.ManagedIdentity --query "registrationState" -o tsv
+# Confirm all registered
+az provider show --namespace Microsoft.Storage \
+  --query "registrationState" -o tsv
+az provider show --namespace Microsoft.Web \
+  --query "registrationState" -o tsv
+az provider show --namespace Microsoft.ManagedIdentity \
+  --query "registrationState" -o tsv
 ```
 
 Expected:
 ```
+Name                  State
+--------------------  -------
+Azure subscription 1  Enabled
+---
+TENANT_ID       : <derived from login>
+SUBSCRIPTION_ID : <derived from login>
+ACCOUNT_EMAIL   : <your email>
 Registered
 Registered
 Registered
@@ -222,7 +262,7 @@ Registered
 
 ```bash
 az group create \
-  --name rg-adls-asp-poc \
+  --name $RESOURCE_GROUP \
   --location eastus
 ```
 
@@ -233,8 +273,8 @@ az group create \
 ```bash
 # Storage account — ADLS Gen2 with maximum security
 az storage account create \
-  --name adlspocstore001 \
-  --resource-group rg-adls-asp-poc \
+  --name $STORAGE_ACCOUNT \
+  --resource-group $RESOURCE_GROUP \
   --location eastus \
   --sku Standard_LRS \
   --kind StorageV2 \
@@ -246,24 +286,24 @@ az storage account create \
 
 # Container — auth-mode login required (shared key disabled)
 az storage fs create \
-  --name raw-data \
-  --account-name adlspocstore001 \
+  --name $CONTAINER_NAME \
+  --account-name $STORAGE_ACCOUNT \
   --auth-mode login
 
 # Upload test file
-echo "ADLS to ASP Transfer PoC — Jagannath Sarkar — $(date)" > sample.txt
+echo "ADLS to ASP Transfer PoC — $(date)" > sample.txt
 
 az storage fs file upload \
   --source sample.txt \
   --path sample.txt \
-  --file-system raw-data \
-  --account-name adlspocstore001 \
+  --file-system $CONTAINER_NAME \
+  --account-name $STORAGE_ACCOUNT \
   --auth-mode login
 
 # Verify
 az storage fs file list \
-  --file-system raw-data \
-  --account-name adlspocstore001 \
+  --file-system $CONTAINER_NAME \
+  --account-name $STORAGE_ACCOUNT \
   --auth-mode login \
   --query "[].{Name:name, Size:contentLength}" \
   -o table
@@ -274,36 +314,37 @@ az storage fs file list \
 ### Phase 4 · App Service Plan + Web App (2 min)
 
 ```bash
-# App Service Plan — Linux B1 (centralus — eastus has capacity issues)
+# App Service Plan — Linux B1
+# centralus used — eastus has Linux capacity issues on new subscriptions
 az appservice plan create \
-  --name asp-adls-poc \
-  --resource-group rg-adls-asp-poc \
+  --name $ASP_NAME \
+  --resource-group $RESOURCE_GROUP \
   --location centralus \
   --sku B1 \
   --is-linux
 
 # Web App — Java 21
 az webapp create \
-  --name webapp-adls-poc \
-  --resource-group rg-adls-asp-poc \
-  --plan asp-adls-poc \
+  --name $WEBAPP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --plan $ASP_NAME \
   --runtime "JAVA:21-java21"
 
-# Security hardening + startup command in one block
+# Security hardening
 az webapp update \
-  --name webapp-adls-poc \
-  --resource-group rg-adls-asp-poc \
+  --name $WEBAPP_NAME \
+  --resource-group $RESOURCE_GROUP \
   --https-only true
 
+# ⚠️ startup-file must be app.jar
+# Azure App Service renames ALL deployed JARs to app.jar automatically
 az webapp config set \
-  --name webapp-adls-poc \
-  --resource-group rg-adls-asp-poc \
+  --name $WEBAPP_NAME \
+  --resource-group $RESOURCE_GROUP \
   --ftps-state Disabled \
   --min-tls-version 1.2 \
   --startup-file "java -jar /home/site/wwwroot/app.jar"
 ```
-
-> ⚠️ Startup command is `app.jar` — App Service renames all deployed JARs to `app.jar` automatically.
 
 ---
 
@@ -311,11 +352,11 @@ az webapp config set \
 
 ```bash
 az webapp config appsettings set \
-  --name webapp-adls-poc \
-  --resource-group rg-adls-asp-poc \
+  --name $WEBAPP_NAME \
+  --resource-group $RESOURCE_GROUP \
   --settings \
-    AZURE_STORAGE_ACCOUNT_NAME="adlspocstore001" \
-    AZURE_STORAGE_CONTAINER_NAME="raw-data" \
+    AZURE_STORAGE_ACCOUNT_NAME="$STORAGE_ACCOUNT" \
+    AZURE_STORAGE_CONTAINER_NAME="$CONTAINER_NAME" \
     AZURE_STORAGE_FILE_NAME="sample.txt"
 ```
 
@@ -326,13 +367,13 @@ az webapp config appsettings set \
 ```bash
 # Enable System-Assigned MSI
 az webapp identity assign \
-  --name webapp-adls-poc \
-  --resource-group rg-adls-asp-poc
+  --name $WEBAPP_NAME \
+  --resource-group $RESOURCE_GROUP
 
 # Capture Principal ID
 export PRINCIPAL_ID=$(az webapp identity show \
-  --name webapp-adls-poc \
-  --resource-group rg-adls-asp-poc \
+  --name $WEBAPP_NAME \
+  --resource-group $RESOURCE_GROUP \
   --query principalId -o tsv)
 
 echo "Principal ID: $PRINCIPAL_ID"
@@ -341,7 +382,7 @@ echo "Principal ID: $PRINCIPAL_ID"
 az role assignment create \
   --assignee $PRINCIPAL_ID \
   --role "Storage Blob Data Reader" \
-  --scope /subscriptions/b4000e1c-6776-4c86-be94-e40611ec1852/resourceGroups/rg-adls-asp-poc/providers/Microsoft.Storage/storageAccounts/adlspocstore001
+  --scope /subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT
 
 # Verify
 az role assignment list \
@@ -354,43 +395,52 @@ az role assignment list \
 
 ### Phase 7 · Service Principal + OIDC Federated Credentials (2 min)
 
-> ⚠️ If rebuilding after teardown — delete old SP first (see Rebuild Considerations above).
-
 ```bash
+# Check and delete existing SP if rebuilding after teardown
+SP_EXISTS=$(az ad sp list \
+  --display-name $SP_NAME \
+  --query "[0].appId" -o tsv)
+
+if [ -n "$SP_EXISTS" ]; then
+  echo "Existing SP found — deleting before recreate..."
+  az ad app delete --id $SP_EXISTS
+  echo "Deleted — proceeding"
+fi
+
 # Create SP for GitHub Actions deployment
 az ad sp create-for-rbac \
-  --name sp-github-deploy-poc \
+  --name $SP_NAME \
   --role contributor \
-  --scopes /subscriptions/b4000e1c-6776-4c86-be94-e40611ec1852/resourceGroups/rg-adls-asp-poc
+  --scopes /subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP
 
-# Save App ID
+# Capture App ID
 export APP_ID=$(az ad sp list \
-  --display-name sp-github-deploy-poc \
+  --display-name $SP_NAME \
   --query "[0].appId" -o tsv)
 
 echo "App ID: $APP_ID"
 
-# Federated credential — push to main
+# Federated credential — push to main branch
 az ad app federated-credential create \
   --id $APP_ID \
-  --parameters '{
-    "name": "github-actions-main",
-    "issuer": "https://token.actions.githubusercontent.com",
-    "subject": "repo:sarkarj/adls-asp-java-poc:ref:refs/heads/main",
-    "audiences": ["api://AzureADTokenExchange"],
-    "description": "GitHub Actions OIDC for main branch"
-  }'
+  --parameters "{
+    \"name\": \"github-actions-main\",
+    \"issuer\": \"https://token.actions.githubusercontent.com\",
+    \"subject\": \"repo:$GITHUB_REPO:ref:refs/heads/main\",
+    \"audiences\": [\"api://AzureADTokenExchange\"],
+    \"description\": \"GitHub Actions OIDC for main branch\"
+  }"
 
 # Federated credential — manual workflow dispatch
 az ad app federated-credential create \
   --id $APP_ID \
-  --parameters '{
-    "name": "github-actions-dispatch",
-    "issuer": "https://token.actions.githubusercontent.com",
-    "subject": "repo:sarkarj/adls-asp-java-poc:workflow_dispatch",
-    "audiences": ["api://AzureADTokenExchange"],
-    "description": "GitHub Actions OIDC for manual dispatch"
-  }'
+  --parameters "{
+    \"name\": \"github-actions-dispatch\",
+    \"issuer\": \"https://token.actions.githubusercontent.com\",
+    \"subject\": \"repo:$GITHUB_REPO:workflow_dispatch\",
+    \"audiences\": [\"api://AzureADTokenExchange\"],
+    \"description\": \"GitHub Actions OIDC for manual dispatch\"
+  }"
 ```
 
 ---
@@ -398,34 +448,49 @@ az ad app federated-credential create \
 ### Phase 8 · GitHub Secrets (1 min)
 
 ```bash
+# Authenticate GitHub CLI
+gh auth login
+
 # Azure auth — IDs only, zero actual secret values
 gh secret set AZURE_CLIENT_ID \
   --body "$APP_ID" \
-  --repo sarkarj/adls-asp-java-poc
+  --repo $GITHUB_REPO
 
 gh secret set AZURE_TENANT_ID \
-  --body "9ffea5dd-3a0c-4a40-b755-398c3d380b50" \
-  --repo sarkarj/adls-asp-java-poc
+  --body "$TENANT_ID" \
+  --repo $GITHUB_REPO
 
 gh secret set AZURE_SUBSCRIPTION_ID \
-  --body "b4000e1c-6776-4c86-be94-e40611ec1852" \
-  --repo sarkarj/adls-asp-java-poc
+  --body "$SUBSCRIPTION_ID" \
+  --repo $GITHUB_REPO
 
 # Config values
 gh secret set AZURE_STORAGE_ACCOUNT_NAME \
-  --body "adlspocstore001" \
-  --repo sarkarj/adls-asp-java-poc
+  --body "$STORAGE_ACCOUNT" \
+  --repo $GITHUB_REPO
 
 gh secret set AZURE_STORAGE_CONTAINER_NAME \
-  --body "raw-data" \
-  --repo sarkarj/adls-asp-java-poc
+  --body "$CONTAINER_NAME" \
+  --repo $GITHUB_REPO
 
 gh secret set AZURE_STORAGE_FILE_NAME \
   --body "sample.txt" \
-  --repo sarkarj/adls-asp-java-poc
+  --repo $GITHUB_REPO
 
 # Verify — 6 secrets, zero actual secret values
-gh secret list --repo sarkarj/adls-asp-java-poc
+gh secret list --repo $GITHUB_REPO
+```
+
+Expected:
+```
+NAME                          UPDATED
+----------------------------  ------------------
+AZURE_CLIENT_ID               just now
+AZURE_TENANT_ID               just now
+AZURE_SUBSCRIPTION_ID         just now
+AZURE_STORAGE_ACCOUNT_NAME    just now
+AZURE_STORAGE_CONTAINER_NAME  just now
+AZURE_STORAGE_FILE_NAME       just now
 ```
 
 ---
@@ -441,15 +506,15 @@ git commit --allow-empty -m "chore: trigger rebuild deployment"
 git push origin main
 
 # Watch pipeline live
-gh run watch --repo sarkarj/adls-asp-java-poc
+gh run watch --repo $GITHUB_REPO
 ```
 
 Pipeline stages:
 ```
-✅ Build JAR       (~20s) — Java 21 compile + fat JAR
-✅ Azure Login     (~5s)  — OIDC token exchange
+✅ Build JAR       (~20s) — Java 21 compile + fat JAR (21.7MB)
+✅ Azure Login     (~5s)  — OIDC token exchange, zero secrets
 ✅ Set Startup     (~5s)  — java -jar /home/site/wwwroot/app.jar
-✅ Deploy JAR      (~30s) — 21.7MB to App Service
+✅ Deploy JAR      (~30s) — deployed as app.jar to App Service
 ```
 
 ---
@@ -457,11 +522,11 @@ Pipeline stages:
 ### Phase 10 · Verify (30 sec)
 
 ```bash
-# Health probe — must return 200 before transfer test
-curl https://webapp-adls-poc.azurewebsites.net/health
+# Health probe — confirm server is running
+curl https://$WEBAPP_NAME.azurewebsites.net/health
 
-# File transfer — wait 30s after health is green
-curl https://webapp-adls-poc.azurewebsites.net/
+# Wait 30 seconds then trigger file transfer
+curl https://$WEBAPP_NAME.azurewebsites.net/
 ```
 
 **Expected:**
@@ -473,8 +538,8 @@ OK — ADLS PoC Running
 ╚══════════════════════════════════════╝
 File      : sample.txt
 Bytes     : 79
-Timestamp : 2026-XX-XXT...Z
-Preview   : ADLS to ASP Transfer PoC — Jagannath Sarkar — ...
+Timestamp : <timestamp>
+Preview   : ADLS to ASP Transfer PoC — <date>
 ```
 
 ---
@@ -494,29 +559,29 @@ AdlsFileTransfer.main()
     ├── HTTP server starts FIRST on port $PORT
     │   └── /health returns 200 immediately (no Azure calls)
     │
-    ▼  (on first GET / request — lazy init)
+    ▼  (on first GET / — lazy init)
 AdlsClientFactory(accountName)
     │
     ├── ManagedIdentityCredential.build()
-    │       ↑ Azure IMDS endpoint provides token automatically
+    │       ↑ Azure IMDS provides token automatically
     │       ↑ Token scoped to Storage Blob Data Reader only
     │
     └── DataLakeServiceClientBuilder
-            .endpoint("https://adlspocstore001.dfs.core.windows.net")
+            .endpoint("https://<account>.dfs.core.windows.net")
             .credential(managedIdentityCredential)
             .buildClient()
     │
     ▼
 AdlsFileService.readFile("sample.txt")
     │
-    ├── fileClient.getProperties()     → verify file exists + get size
-    ├── Guard: fileSize > 10MB         → reject — returns failure result
+    ├── fileClient.getProperties()     → verify exists + get size
+    ├── Guard: fileSize > 10MB         → reject oversized files
     ├── fileClient.read(outputStream)  → stream bytes into memory
-    └── sanitizeError()                → strip tokens from any error message
+    └── sanitizeError()                → strip tokens from errors
     │
     ▼
 TransferResult.success(fileName, bytes, preview)
-    │   Java 21 record — immutable, thread-safe, validated in constructor
+    │   Java 21 record — immutable, thread-safe
     │
     ▼
 HTTP 200 — plain text response
@@ -548,12 +613,12 @@ adls-asp-java-poc/
 | Resource | Name | Type | Location | Note |
 |---|---|---|---|---|
 | Resource Group | `rg-adls-asp-poc` | Container | eastus | Teardown = delete this |
-| Storage Account | `adlspocstore001` | ADLS Gen2 | eastus | HNS enabled |
-| Container | `raw-data` | Filesystem | — | AAD auth only |
-| Test File | `sample.txt` | Blob | — | 79 bytes |
+| Storage Account | `adlspocstore001` | ADLS Gen2 | eastus | HNS + AAD auth only |
+| Container | `raw-data` | Filesystem | — | No public access |
+| Test File | `sample.txt` | Blob | — | ~79 bytes |
 | App Service Plan | `asp-adls-poc` | B1 Linux | centralus | eastus has capacity issues |
-| Web App | `webapp-adls-poc` | Java 21 | centralus | app.jar startup |
-| Managed Identity | System-Assigned | MSI | centralus | Tied to web app |
+| Web App | `webapp-adls-poc` | Java 21 | centralus | Startup: app.jar |
+| Managed Identity | System-Assigned | MSI | centralus | Tied to web app lifecycle |
 | Service Principal | `sp-github-deploy-poc` | OIDC only | Azure AD | Survives teardown |
 
 ---
@@ -563,10 +628,11 @@ adls-asp-java-poc/
 | Vector | Status |
 |---|---|
 | Secrets in source code | ❌ Zero |
+| IDs hardcoded in README | ❌ Zero — all derived from login |
 | Secrets in GitHub Actions | ❌ Zero — IDs only |
 | Secrets in App Service settings | ❌ Zero — config values only |
 | Credential rotation | ✅ Automatic — Azure managed |
-| OIDC token lifetime | ✅ Ephemeral — per pipeline run only |
+| OIDC token lifetime | ✅ Ephemeral — per pipeline run |
 | Storage transport | ✅ HTTPS + TLS 1.2 enforced |
 | Storage auth | ✅ AAD only — shared keys disabled |
 | Public blob access | ✅ Disabled |
@@ -574,22 +640,22 @@ adls-asp-java-poc/
 | RBAC scope | ✅ Reader only — single storage account |
 | Error log sanitization | ✅ Bearer/SAS tokens stripped |
 | Memory safety | ✅ 10MB file size cap |
-| Blast radius if repo leaked | ✅ Zero exploitable values |
+| Blast radius if repo public | ✅ Zero exploitable values |
 
 ---
 
 ## 📊 GitHub Secrets Reference
 
-| Secret | Type | Value |
+| Secret | Derived From | Value Type |
 |---|---|---|
-| `AZURE_CLIENT_ID` | App Registration ID | SP App ID (not a secret) |
-| `AZURE_TENANT_ID` | Directory ID | Azure AD Tenant (not a secret) |
-| `AZURE_SUBSCRIPTION_ID` | Subscription ID | Azure Subscription (not a secret) |
-| `AZURE_STORAGE_ACCOUNT_NAME` | Config | `adlspocstore001` |
-| `AZURE_STORAGE_CONTAINER_NAME` | Config | `raw-data` |
-| `AZURE_STORAGE_FILE_NAME` | Config | `sample.txt` |
+| `AZURE_CLIENT_ID` | `$APP_ID` | App Registration ID |
+| `AZURE_TENANT_ID` | `$TENANT_ID` | Azure AD Directory ID |
+| `AZURE_SUBSCRIPTION_ID` | `$SUBSCRIPTION_ID` | Azure Subscription ID |
+| `AZURE_STORAGE_ACCOUNT_NAME` | `$STORAGE_ACCOUNT` | Config — not a secret |
+| `AZURE_STORAGE_CONTAINER_NAME` | `$CONTAINER_NAME` | Config — not a secret |
+| `AZURE_STORAGE_FILE_NAME` | Hardcoded `sample.txt` | Config — not a secret |
 
-> None of the above are actual secrets — all are non-sensitive identifiers or config values.
+> All values set via CLI variables derived from `az login` — never typed manually.
 
 ---
 
@@ -599,7 +665,7 @@ One command — deletes all Azure resources, stops all billing:
 
 ```bash
 az group delete \
-  --name rg-adls-asp-poc \
+  --name $RESOURCE_GROUP \
   --yes \
   --no-wait
 ```
@@ -622,4 +688,4 @@ az group delete \
 
 ---
 
-*Built by Jagannath Sarkar · Java 21 · Azure App Service · ADLS Gen2 · Managed Identity · OIDC*
+*Built with Java 21 · Azure App Service · ADLS Gen2 · Managed Identity · OIDC*
