@@ -5,88 +5,80 @@
          http://maven.apache.org/xsd/maven-4.0.0.xsd">
 
   <modelVersion>4.0.0</modelVersion>
+
+  <!-- Spring Boot Parent — manages all dependency versions -->
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.3.0</version>
+    <relativePath/>
+  </parent>
+
   <groupId>com.poc.adls</groupId>
   <artifactId>adls-asp-poc</artifactId>
-  <version>1.0.0</version>
+  <version>2.0.0</version>
   <packaging>jar</packaging>
+  <name>ADLS ASP File Transfer PoC</name>
+  <description>Bidirectional file transfer between ADLS Gen2 and Azure App Service — Java 21 + MSI + Spring Boot</description>
 
   <properties>
     <java.version>21</java.version>
     <maven.compiler.source>21</maven.compiler.source>
     <maven.compiler.target>21</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <!-- Dependency versions — single place to update -->
+    <!-- Azure SDK versions — single place to update -->
     <azure.identity.version>1.11.4</azure.identity.version>
     <azure.datalake.version>12.19.0</azure.datalake.version>
-    <slf4j.version>2.0.12</slf4j.version>
   </properties>
 
   <dependencies>
-    <!-- Azure MSI + DefaultAzureCredential -->
+
+    <!-- Spring Boot Web — embedded Tomcat + Spring MVC -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- Spring Boot Actuator — /actuator/health endpoint -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <!-- Azure Managed Identity credential -->
     <dependency>
       <groupId>com.azure</groupId>
       <artifactId>azure-identity</artifactId>
       <version>${azure.identity.version}</version>
     </dependency>
 
-    <!-- ADLS Gen2 SDK -->
+    <!-- Azure ADLS Gen2 SDK -->
     <dependency>
       <groupId>com.azure</groupId>
       <artifactId>azure-storage-file-datalake</artifactId>
       <version>${azure.datalake.version}</version>
     </dependency>
 
-    <!-- Logging — SLF4J + Simple binding -->
-    <dependency>
-      <groupId>org.slf4j</groupId>
-      <artifactId>slf4j-simple</artifactId>
-      <version>${slf4j.version}</version>
-    </dependency>
   </dependencies>
 
   <build>
     <plugins>
-      <!-- Fat JAR — all dependencies bundled -->
+
+      <!-- Spring Boot Maven Plugin — creates executable fat JAR -->
+      <!-- Replaces maven-shade-plugin — handles service loader merging automatically -->
       <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-shade-plugin</artifactId>
-        <version>3.5.1</version>
-        <executions>
-          <execution>
-            <phase>package</phase>
-            <goals><goal>shade</goal></goals>
-            <configuration>
-              <createDependencyReducedPom>false</createDependencyReducedPom>
-              <filters>
-                <filter>
-                  <!-- Strip signature files — prevents JAR security exceptions -->
-                  <artifact>*:*</artifact>
-                  <excludes>
-                    <exclude>META-INF/*.SF</exclude>
-                    <exclude>META-INF/*.DSA</exclude>
-                    <exclude>META-INF/*.RSA</exclude>
-                  </excludes>
-                </filter>
-              </filters>
-              <transformers>
-                <transformer implementation=
-                  "org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                  <mainClass>com.poc.adls.AdlsFileTransfer</mainClass>
-                </transformer>
-                <!-- Merge Azure SDK service loader files correctly -->
-                <transformer implementation=
-                  "org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
-              </transformers>
-            </configuration>
-          </execution>
-        </executions>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <!-- Exclude dev tools from production JAR -->
+          <excludeDevtools>true</excludeDevtools>
+        </configuration>
       </plugin>
 
-      <!-- Enforce Java 21 -->
+      <!-- Enforce Java 21 compilation -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
-        <version>3.12.1</version>
         <configuration>
           <release>21</release>
           <compilerArgs>
@@ -94,6 +86,8 @@
           </compilerArgs>
         </configuration>
       </plugin>
+
     </plugins>
   </build>
+
 </project>

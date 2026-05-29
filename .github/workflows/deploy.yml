@@ -8,11 +8,12 @@ on:
 env:
   JAVA_VERSION: '21'
   AZURE_WEBAPP_NAME: webapp-adls-poc
+  JAR_NAME: adls-asp-poc-2.0.0.jar
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
-  id-token: write
-  contents: read
+  id-token: write   # Required for OIDC token generation
+  contents: read    # Required for repo checkout
 
 jobs:
   build:
@@ -36,13 +37,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-jar
-          path: target/adls-asp-poc-1.0.0.jar
+          path: target/${{ env.JAR_NAME }}
           retention-days: 1
 
   deploy:
     name: Deploy to Azure App Service
     runs-on: ubuntu-latest
     needs: build
+
     steps:
       - name: Download JAR artifact
         uses: actions/download-artifact@v4
@@ -50,7 +52,7 @@ jobs:
           name: app-jar
           path: target/
 
-      - name: Azure Login — OIDC
+      - name: Azure Login — OIDC (zero secrets)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -71,4 +73,4 @@ jobs:
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
-          package: target/adls-asp-poc-1.0.0.jar
+          package: target/${{ env.JAR_NAME }}
