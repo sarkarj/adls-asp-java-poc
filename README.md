@@ -81,7 +81,6 @@
 │     ✅ No shared key access — AAD only                          │
 │     ✅ Network firewall — App Service IPs only                  │
 │     ✅ Blob soft delete (7 days)                                 │
-│     ✅ Blob versioning — full audit trail                        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -151,7 +150,6 @@ ADLS Gen2 (Storage Blob Data Contributor)
 | ADLS network firewall | App Service outbound IPs only | No other source can reach ADLS |
 | RBAC tightly scoped | Contributor on single storage account | Least privilege for read+write |
 | Blob soft delete | 7-day recovery window | Accidental write recovery |
-| Blob versioning | Full history | Audit trail for all writes |
 | Error sanitization | Bearer/SAS tokens stripped from logs | Prevents token leakage |
 | `@ExceptionHandler` | No stack traces in responses | Prevents internal exposure |
 | `show-details=never` | Actuator returns UP/DOWN only | No internal details exposed |
@@ -195,6 +193,11 @@ Quota approved at subscription level — survives teardown.
 ### GitHub Secrets — AZURE_CLIENT_ID Must Update
 After SP delete + recreate, `AZURE_CLIENT_ID` must be updated — new SP = new App ID.
 Phase 8 always updates all secrets. Do not skip.
+
+### App Settings Display Behavior
+`az webapp config appsettings set` always shows `null` values in its response —
+this is normal Azure CLI behavior for security. Always verify with
+`az webapp config appsettings list` to confirm actual values.
 
 ---
 
@@ -336,16 +339,27 @@ az webapp config appsettings set \
     LOGGING_LEVEL_COM_AZURE="WARN" \
     SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE="10MB" \
     SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE="10MB"
+
+# Verify — list shows real values (set response always shows null)
+az webapp config appsettings list \
+  --name $WEBAPP_NAME \
+  --resource-group $RESOURCE_GROUP \
+  --query "[].{Key:name, Value:value}" \
+  -o table
 ```
 
 ---
 
-### Phase 6 · Managed Identity + RBAC (1 min)
+### Phase 6 · Managed Identity + RBAC (2 min)
 
 ```bash
 az webapp identity assign \
   --name $WEBAPP_NAME \
   --resource-group $RESOURCE_GROUP
+
+# ⚠️ MSI takes 30s to propagate to Azure AD — RBAC assignment fails without this wait
+echo "Waiting 30s for MSI propagation to Azure AD..."
+sleep 30
 
 export PRINCIPAL_ID=$(az webapp identity show \
   --name $WEBAPP_NAME \
@@ -360,10 +374,19 @@ az role assignment create \
   --role "Storage Blob Data Contributor" \
   --scope /subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT
 
+# ⚠️ Use --scope for reliable results — list without scope may return empty
 az role assignment list \
   --assignee $PRINCIPAL_ID \
-  --query "[].{Role:roleDefinitionName, Scope:scope}" \
+  --scope /subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT \
+  --query "[].{Role:roleDefinitionName, Principal:principalType}" \
   -o table
+```
+
+Expected:
+```
+Role                           Principal
+-----------------------------  ----------------
+Storage Blob Data Contributor  ServicePrincipal
 ```
 
 ---
@@ -468,7 +491,7 @@ gh secret set AZURE_STORAGE_CONTAINER_NAME \
   --body "$CONTAINER_NAME" \
   --repo $GITHUB_REPO
 
-# Verify — 5 secrets (AZURE_STORAGE_FILE_NAME removed — now via query param)
+# Verify — 5 secrets
 gh secret list --repo $GITHUB_REPO
 ```
 
@@ -536,16 +559,44 @@ az storage blob service-properties delete-policy update \
   --enable true \
   --days-retained 7
 
-# H3 — Blob versioning (audit trail for all writes)
-az storage account blob-service-properties update \
-  --account-name $STORAGE_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --enable-versioning true
+# H3 — Blob versioning SKIPPED
+# ⚠️ Not supported on ADLS Gen2 HNS-enabled accounts (FeatureNotSupportedForAccount)
+# Soft delete (H2) provides recovery capability as alternative
 ```
 
 ---
 
-### Phase 10 · Monitoring — Application Insights (2 min)
+### Phase 10 · Monitoring — Application Insights (3 min)
+
+> ⚠️ Run each step separately and verify before proceeding to the next.
+> `az webapp config appsettings set` always shows `null` in its response —
+> this is normal. Always verify with `list`.
+
+#### Step 10A · Register Required Providers
+
+```bash
+az provider register --namespace microsoft.operationalinsights
+az provider register --namespace microsoft.insights
+
+# ⚠️ Wait until BOTH show Registered before proceeding — takes 1-2 min
+az provider show \
+  --namespace microsoft.operationalinsights \
+  --query "registrationState" -o tsv
+
+az provider show \
+  --namespace microsoft.insights \
+  --query "registrationState" -o tsv
+```
+
+Expected — do NOT proceed until both show:
+```
+Registered
+Registered
+```
+
+---
+
+#### Step 10B · Create Application Insights
 
 ```bash
 az monitor app-insights component create \
@@ -554,10 +605,32 @@ az monitor app-insights component create \
   --resource-group $RESOURCE_GROUP \
   --application-type web
 
+# Verify creation before capturing key
+az monitor app-insights component show \
+  --app adls-poc-insights \
+  --resource-group $RESOURCE_GROUP \
+  --query "{Name:name, State:provisioningState}" \
+  -o table
+```
+
+Expected:
+```
+Name              State
+----------------  ---------
+adls-poc-insights Succeeded
+```
+
+---
+
+#### Step 10C · Capture Key + Wire to App Service
+
+```bash
 export APPINSIGHTS_KEY=$(az monitor app-insights component show \
   --app adls-poc-insights \
   --resource-group $RESOURCE_GROUP \
   --query instrumentationKey -o tsv)
+
+echo "Key captured: ${APPINSIGHTS_KEY:0:8}..."
 
 az webapp config appsettings set \
   --name $WEBAPP_NAME \
@@ -566,22 +639,17 @@ az webapp config appsettings set \
     APPLICATIONINSIGHTS_CONNECTION_STRING="InstrumentationKey=$APPINSIGHTS_KEY" \
     ApplicationInsightsAgent_EXTENSION_VERSION="~3"
 
-# ADLS audit logging
-export STORAGE_ID=$(az storage account show \
-  --name $STORAGE_ACCOUNT \
+# Verify key wired correctly (list shows real values)
+az webapp config appsettings list \
+  --name $WEBAPP_NAME \
   --resource-group $RESOURCE_GROUP \
-  --query id -o tsv)
+  --query "[?name=='APPLICATIONINSIGHTS_CONNECTION_STRING'].value" \
+  -o tsv
+```
 
-export INSIGHTS_ID=$(az monitor app-insights component show \
-  --app adls-poc-insights \
-  --resource-group $RESOURCE_GROUP \
-  --query id -o tsv)
-
-az monitor diagnostic-settings create \
-  --name adls-diagnostics \
-  --resource $STORAGE_ID/blobServices/default \
-  --workspace $INSIGHTS_ID \
-  --logs '[{"category":"StorageRead","enabled":true},{"category":"StorageWrite","enabled":true}]'
+Expected:
+```
+InstrumentationKey=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx;IngestionEndpoint=...
 ```
 
 ---
@@ -589,13 +657,8 @@ az monitor diagnostic-settings create \
 ### Phase 11 · Deploy (2 min)
 
 ```bash
-# Navigate to repo
-cd /path/to/adls-asp-java-poc
-
-# Trigger pipeline — manual dispatch, no code changes needed
 gh workflow run deploy.yml --repo $GITHUB_REPO
 
-# Capture run ID — avoids interactive selection prompt
 sleep 3
 export RUN_ID=$(gh run list \
   --repo $GITHUB_REPO \
@@ -776,7 +839,7 @@ adls-asp-java-poc/
 | Path traversal | ✅ Strict regex allowlist on all file names |
 | Null byte injection | ✅ Explicit null byte check |
 | Blob soft delete | ✅ 7-day recovery window |
-| Blob versioning | ✅ Full audit trail for all writes |
+| Blob versioning | ⚠️ Not supported on ADLS Gen2 HNS accounts |
 | POST body size | ✅ 10MB cap via Spring properties |
 | No external write input | ✅ ASP generates content — no body accepted |
 | Error log sanitization | ✅ Bearer/SAS tokens stripped |
