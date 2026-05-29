@@ -10,7 +10,6 @@ import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -21,7 +20,7 @@ import java.util.Objects;
  *
  * Endpoints:
  *   GET  /read?file={fileName}  → reads file from ADLS → returns content
- *   POST /write?file={fileName} → writes request body to ADLS as file
+ *   POST /write?file={fileName} → App Service generates content → writes to ADLS
  *
  * Health liveness probe handled by Spring Actuator at /actuator/health.
  *
@@ -30,7 +29,7 @@ import java.util.Objects;
  *   - @RequestParam required=true (default) — missing param returns 400
  *   - text/plain responses — no JSON, no serialization attack surface
  *   - @ExceptionHandler — consistent error responses, no stack traces exposed
- *   - All business logic delegated to AdlsService — controller is routing only
+ *   - No @RequestBody on write — ASP generates content, no external input accepted
  */
 @RestController
 public final class AdlsController {
@@ -77,30 +76,23 @@ public final class AdlsController {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Writes the request body as a file to ADLS Gen2.
-     * Creates the file if it does not exist; overwrites if it does.
+     * App Service generates content from its own environment metadata
+     * and writes it to ADLS Gen2 as a file.
      *
-     * Content-Type: text/plain required.
-     * Max body size: 10MB (enforced by Spring Boot — see application.properties).
+     * No request body required or accepted — ASP is the sole content source.
+     * Generated content: hostname, instance ID, region, timestamp, version.
      *
-     * @param fileName file path within the ADLS container (query param)
-     * @param content  text content to write (request body)
+     * @param fileName target file path in ADLS container (query param)
      * @return 201 + confirmation on success, 400 on invalid input, 500 on failure
      *
-     * Example: POST /write?file=output.txt  Body: "Hello from App Service"
+     * Example: POST /write?file=output.txt
      */
-    @PostMapping(
-            value   = "/write",
-            consumes = MediaType.TEXT_PLAIN_VALUE,
-            produces = MediaType.TEXT_PLAIN_VALUE)
+    @PostMapping(value = "/write", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> writeFile(
-            @RequestParam("file") final String fileName,
-            @RequestBody final String content) {
+            @RequestParam("file") final String fileName) {
 
-        LOG.info("POST /write — file: {} contentLength: {}", fileName,
-                content == null ? 0 : content.length());
-
-        final TransferResult result = adlsService.writeFile(fileName, content);
+        LOG.info("POST /write — file: {} (ASP-generated content)", fileName);
+        final TransferResult result = adlsService.writeGeneratedContent(fileName);
 
         if (result.success()) {
             return ResponseEntity.status(HttpStatus.CREATED)
@@ -116,10 +108,6 @@ public final class AdlsController {
     // Exception Handlers — consistent error responses, no stack traces
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Handles missing required query parameter — returns 400.
-     * Example: GET /read (without ?file=) → "Missing required parameter: file"
-     */
     @ExceptionHandler(MissingServletRequestParameterException.class)
     public ResponseEntity<String> handleMissingParam(
             final MissingServletRequestParameterException ex) {
@@ -127,15 +115,11 @@ public final class AdlsController {
         return ResponseEntity.badRequest()
                 .contentType(MediaType.TEXT_PLAIN)
                 .body(String.format("Missing required query parameter: %s%n" +
-                        "Usage: GET /read?file=filename.txt%n" +
+                        "Usage: GET  /read?file=filename.txt%n" +
                         "       POST /write?file=filename.txt%n",
                         ex.getParameterName()));
     }
 
-    /**
-     * Handles wrong HTTP method — returns 405.
-     * Example: POST /read → "Method not allowed"
-     */
     @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
     public ResponseEntity<String> handleMethodNotAllowed(
             final HttpRequestMethodNotSupportedException ex) {
@@ -147,10 +131,6 @@ public final class AdlsController {
                         ex.getMethod()));
     }
 
-    /**
-     * Catch-all handler — returns 500 without exposing internals.
-     * Stack trace is logged server-side only.
-     */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<String> handleUnexpected(final Exception ex) {
         LOG.error("Unhandled exception: {}", ex.getMessage(), ex);
