@@ -139,6 +139,7 @@ ADLS Gen2 (Storage Blob Data Contributor)
 | Zero hardcoded IDs in README | All derived from `az login` | Safe to make repo public |
 | ManagedIdentityCredential direct | Skips 6-provider chain | Faster cold start on App Service |
 | Spring-managed ADLS client | Singleton @Bean | Eliminates Phase 1 race condition |
+| Log injection prevention | `LogUtils.sanitize()` on all user-controlled log values | Blocks CWE-117 newline injection |
 | Path traversal prevention | Strict filename regex allowlist | Rejects `..`, `/`, `\`, null bytes |
 | File size cap on read | 10MB hard limit in service | Guards against OOM |
 | POST body size cap on write | 10MB via Spring properties | Guards against large payload attacks |
@@ -154,6 +155,7 @@ ADLS Gen2 (Storage Blob Data Contributor)
 | Error sanitization | Bearer/SAS tokens stripped from logs | Prevents token leakage |
 | `@ExceptionHandler` | No stack traces in responses | Prevents internal exposure |
 | `show-details=never` | Actuator returns UP/DOWN only | No internal details exposed |
+| OWASP dependency scan | `dependency-check-maven` in pipeline | Catches CVEs in dependencies before deploy |
 
 ---
 
@@ -328,7 +330,7 @@ az webapp config appsettings set \
     AZURE_STORAGE_ACCOUNT_NAME="$STORAGE_ACCOUNT" \
     AZURE_STORAGE_CONTAINER_NAME="$CONTAINER_NAME" \
     SPRING_PROFILES_ACTIVE="production" \
-    MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE="health,info" \
+    MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE="health" \
     MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS="never" \
     LOGGING_LEVEL_COM_POC_ADLS="INFO" \
     LOGGING_LEVEL_COM_AZURE="WARN" \
@@ -609,6 +611,7 @@ gh run watch $RUN_ID --repo $GITHUB_REPO
 Pipeline stages:
 ```
 ✅ Build JAR       (~20s) — Java 21 + Spring Boot Maven Plugin
+✅ OWASP Scan      (~60s) — CVE check on all dependencies
 ✅ Azure Login     (~5s)  — OIDC token exchange, zero secrets
 ✅ Set Startup     (~5s)  — java -jar /home/site/wwwroot/app.jar
 ✅ Deploy JAR      (~40s) — ~55MB Spring Boot fat JAR
@@ -674,6 +677,7 @@ AdlsController.readFile("sample.txt")
     │  @RequestParam — 400 if missing
     ▼
 AdlsService.readFile("sample.txt")
+    │  LogUtils.sanitize(fileName) → safe log output (CWE-117)
     │  validateFileName() → regex allowlist
     │  ManagedIdentityCredential → Storage Blob Data Contributor
     │  fileClient.getProperties() → verify exists + size
@@ -696,6 +700,7 @@ AdlsController.writeFile("output.txt")
     │  @RequestParam — 400 if missing
     ▼
 AdlsService.writeGeneratedContent("output.txt")
+    │  LogUtils.sanitize(fileName) → safe log output (CWE-117)
     │  validateFileName() → regex allowlist + null byte check
     │  resolveEnv(WEBSITE_HOSTNAME, WEBSITE_INSTANCE_ID, REGION_NAME)
     │  Generates structured content from App Service environment
@@ -717,17 +722,18 @@ ResponseEntity 201 — text/plain
 adls-asp-java-poc/
 ├── .github/
 │   └── workflows/
-│       └── deploy.yml                    ← OIDC build + deploy pipeline
+│       └── deploy.yml                    ← OIDC build + deploy + OWASP scan pipeline
 ├── src/main/java/com/poc/adls/
 │   ├── AdlsApplication.java             ← @SpringBootApplication entry point
 │   ├── AdlsConfig.java                  ← @Configuration — MSI + ADLS client @Bean
 │   ├── AdlsController.java              ← @RestController — /read + /write endpoints
 │   ├── AdlsService.java                 ← @Service — readFile() + writeGeneratedContent()
 │   ├── GlobalExceptionHandler.java      ← @RestControllerAdvice — global error handler
+│   ├── LogUtils.java                    ← Log injection prevention — sanitizes user input
 │   └── TransferResult.java             ← Java 21 record — immutable result type
 ├── src/main/resources/
 │   └── application.properties           ← Spring Boot config
-├── pom.xml                              ← Spring Boot 3.3 + Maven
+├── pom.xml                              ← Spring Boot 3.3 + Maven + OWASP plugin
 ├── .gitignore
 └── README.md
 ```
@@ -766,6 +772,7 @@ adls-asp-java-poc/
 | FTP access | ✅ Disabled |
 | SCM basic auth | ✅ Disabled — Kudu via AAD/portal only |
 | RBAC scope | ✅ Contributor only on single storage account |
+| Log injection (CWE-117) | ✅ LogUtils.sanitize() on all user-controlled log values |
 | Path traversal | ✅ Strict regex allowlist on all file names |
 | Null byte injection | ✅ Explicit null byte check |
 | Blob soft delete | ✅ 7-day recovery window |
@@ -776,6 +783,8 @@ adls-asp-java-poc/
 | Stack traces in responses | ✅ Never — @ExceptionHandler + @RestControllerAdvice |
 | Spring error page details | ✅ Never — server.error.include-message=never |
 | Actuator details | ✅ Never — UP/DOWN only |
+| Actuator version disclosure | ✅ info endpoint removed — health only |
+| Dependency CVEs | ✅ OWASP dependency-check in pipeline |
 | Blast radius if repo public | ✅ Zero exploitable values |
 
 ---
