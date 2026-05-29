@@ -28,7 +28,8 @@ import java.util.regex.Pattern;
  *   - Error sanitization        → Bearer/SAS tokens stripped from logs
  *   - Never throws to caller    → always returns TransferResult
  *   - Immutable client          → Spring-managed singleton, thread-safe
- *   - No broad throws clause    → writeToAdls() does not declare throws Exception (F7)
+ *   - No try-with-resources on ByteArrayInputStream — close() is a documented no-op,
+ *     holds no external resources, declaring it avoids spurious IOException (F7)
  */
 @Service
 public final class AdlsService {
@@ -111,7 +112,6 @@ public final class AdlsService {
             }
 
         } catch (final IllegalArgumentException ex) {
-            // F1 FIX: sanitize fileName in warn log — file never passed validation
             LOG.warn("Read rejected — invalid file name: {} reason: {}",
                     LogUtils.sanitize(fileName), ex.getMessage());
             return TransferResult.failure(fileName, ex.getMessage());
@@ -145,7 +145,6 @@ public final class AdlsService {
      * @return TransferResult.written() on success, or TransferResult.failure() with error
      */
     public TransferResult writeGeneratedContent(final String fileName) {
-        // F1 FIX: sanitize before logging — prevents log injection via newline chars
         LOG.info("Write request — file: {} (ASP-generated content)",
                 LogUtils.sanitize(fileName));
 
@@ -195,9 +194,11 @@ public final class AdlsService {
      * Writes UTF-8 encoded content to ADLS Gen2.
      * Creates file if absent; overwrites if present.
      *
-     * F7 FIX: No longer declares 'throws Exception' — Azure SDK throws only
-     * unchecked RuntimeExceptions; no checked exceptions are raised here.
-     * Callers wrap in catch(Exception) to handle unchecked SDK exceptions.
+     * ByteArrayInputStream is intentionally NOT used with try-with-resources.
+     * Its close() method is documented as a no-op (holds no external resources).
+     * Using try-with-resources would require declaring throws IOException on this
+     * method due to the implicit close() call — an unnecessary compiler constraint
+     * for a stream that provably never throws on close.
      */
     private TransferResult writeToAdls(final String fileName, final String content) {
         final byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
@@ -206,10 +207,10 @@ public final class AdlsService {
         // Create or overwrite — true = overwrite existing file
         fileClient.create(true);
 
-        // Append content block starting at offset 0
-        try (final var inputStream = new ByteArrayInputStream(bytes)) {
-            fileClient.append(inputStream, 0, bytes.length);
-        }
+        // ByteArrayInputStream — in-memory only, no external resources
+        // Not using try-with-resources: close() is a documented no-op, never throws
+        final ByteArrayInputStream inputStream = new ByteArrayInputStream(bytes);
+        fileClient.append(inputStream, 0, bytes.length);
 
         // Flush and commit — makes file immediately readable
         fileClient.flush(bytes.length, true);
