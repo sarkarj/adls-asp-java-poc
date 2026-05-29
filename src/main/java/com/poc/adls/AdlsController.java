@@ -25,6 +25,7 @@ import java.util.Objects;
  * Health liveness probe handled by Spring Actuator at /actuator/health.
  *
  * Security:
+ *   - Log injection prevention  → LogUtils.sanitize() on all user-controlled log values (F1)
  *   - @GetMapping / @PostMapping — explicit method binding, no wildcard methods
  *   - @RequestParam required=true (default) — missing param returns 400
  *   - text/plain responses — no JSON, no serialization attack surface
@@ -58,7 +59,8 @@ public final class AdlsController {
     public ResponseEntity<String> readFile(
             @RequestParam("file") final String fileName) {
 
-        LOG.info("GET /read — file: {}", fileName);
+        // F1 FIX: sanitize before logging — prevents log injection via newline chars
+        LOG.info("GET /read — file: {}", LogUtils.sanitize(fileName));
         final TransferResult result = adlsService.readFile(fileName);
 
         if (result.success()) {
@@ -91,7 +93,9 @@ public final class AdlsController {
     public ResponseEntity<String> writeFile(
             @RequestParam("file") final String fileName) {
 
-        LOG.info("POST /write — file: {} (ASP-generated content)", fileName);
+        // F1 FIX: sanitize before logging — prevents log injection via newline chars
+        LOG.info("POST /write — file: {} (ASP-generated content)",
+                LogUtils.sanitize(fileName));
         final TransferResult result = adlsService.writeGeneratedContent(fileName);
 
         if (result.success()) {
@@ -108,6 +112,10 @@ public final class AdlsController {
     // Exception Handlers — consistent error responses, no stack traces
     // ─────────────────────────────────────────────────────────────────────────
 
+    /**
+     * Handles missing required query parameter — returns 400.
+     * Example: GET /read (without ?file=) → clear usage message
+     */
     @ExceptionHandler(MissingServletRequestParameterException.class)
     public ResponseEntity<String> handleMissingParam(
             final MissingServletRequestParameterException ex) {
@@ -120,6 +128,10 @@ public final class AdlsController {
                         ex.getParameterName()));
     }
 
+    /**
+     * Handles wrong HTTP method — returns 405.
+     * Example: POST /read → "Method not allowed"
+     */
     @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
     public ResponseEntity<String> handleMethodNotAllowed(
             final HttpRequestMethodNotSupportedException ex) {
@@ -131,6 +143,11 @@ public final class AdlsController {
                         ex.getMethod()));
     }
 
+    /**
+     * Catch-all handler — returns 500 without exposing internals.
+     * Stack trace logged server-side only — never exposed to client.
+     * GlobalExceptionHandler provides additional coverage outside this controller.
+     */
     @ExceptionHandler(Exception.class)
     public ResponseEntity<String> handleUnexpected(final Exception ex) {
         LOG.error("Unhandled exception: {}", ex.getMessage(), ex);

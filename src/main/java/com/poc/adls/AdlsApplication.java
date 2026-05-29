@@ -16,7 +16,7 @@ import org.springframework.context.event.EventListener;
  * Endpoints:
  *   GET  /actuator/health        → liveness probe (Spring Actuator)
  *   GET  /read?file={fileName}   → read file from ADLS → ASP
- *   POST /write?file={fileName}  → write body content ASP → ADLS
+ *   POST /write?file={fileName}  → ASP generates content internally → ADLS  ← F8 FIX
  */
 @SpringBootApplication
 public class AdlsApplication {
@@ -38,6 +38,6 @@ public class AdlsApplication {
         LOG.info("╚══════════════════════════════════════════════╝");
         LOG.info("  GET  /actuator/health        → liveness probe");
         LOG.info("  GET  /read?file={{fileName}}   → ADLS → ASP");
-        LOG.info("  POST /write?file={{fileName}}  → ASP → ADLS");
+        LOG.info("  POST /write?file={{fileName}}  → ASP generates content → ADLS");
     }
 }

@@ -6,11 +6,15 @@
 
   <modelVersion>4.0.0</modelVersion>
 
-  <!-- Spring Boot Parent — manages all dependency versions -->
+  <!--
+    F3 FIX: Upgraded Spring Boot parent to latest 3.3.x patch.
+    Always verify latest at: https://spring.io/projects/spring-boot#learn
+    Run: mvn versions:display-dependency-updates to check for newer versions.
+  -->
   <parent>
     <groupId>org.springframework.boot</groupId>
     <artifactId>spring-boot-starter-parent</artifactId>
-    <version>3.3.0</version>
+    <version>3.3.6</version>
     <relativePath/>
   </parent>
 
@@ -19,16 +23,26 @@
   <version>2.0.0</version>
   <packaging>jar</packaging>
   <name>ADLS ASP File Transfer PoC</name>
-  <description>Bidirectional file transfer between ADLS Gen2 and Azure App Service — Java 21 + MSI + Spring Boot</description>
+  <description>
+    Bidirectional file transfer between ADLS Gen2 and Azure App Service.
+    Java 21 + Spring Boot + Managed Identity + OIDC.
+  </description>
 
   <properties>
     <java.version>21</java.version>
     <maven.compiler.source>21</maven.compiler.source>
     <maven.compiler.target>21</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <!-- Azure SDK versions — single place to update -->
-    <azure.identity.version>1.11.4</azure.identity.version>
-    <azure.datalake.version>12.19.0</azure.datalake.version>
+
+    <!--
+      F4 FIX: Azure SDK versions upgraded to latest available.
+      Verify latest at: https://mvnrepository.com/artifact/com.azure
+    -->
+    <azure.identity.version>1.13.3</azure.identity.version>
+    <azure.datalake.version>12.21.0</azure.datalake.version>
+
+    <!-- F5: OWASP dependency check version — single place to update -->
+    <owasp.version>9.2.0</owasp.version>
   </properties>
 
   <dependencies>
@@ -45,14 +59,14 @@
       <artifactId>spring-boot-starter-actuator</artifactId>
     </dependency>
 
-    <!-- Azure Managed Identity credential -->
+    <!-- Azure Managed Identity credential — F4: upgraded to ${azure.identity.version} -->
     <dependency>
       <groupId>com.azure</groupId>
       <artifactId>azure-identity</artifactId>
       <version>${azure.identity.version}</version>
     </dependency>
 
-    <!-- Azure ADLS Gen2 SDK -->
+    <!-- Azure ADLS Gen2 SDK — F4: upgraded to ${azure.datalake.version} -->
     <dependency>
       <groupId>com.azure</groupId>
       <artifactId>azure-storage-file-datalake</artifactId>
@@ -65,17 +79,15 @@
     <plugins>
 
       <!-- Spring Boot Maven Plugin — creates executable fat JAR -->
-      <!-- Replaces maven-shade-plugin — handles service loader merging automatically -->
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
         <configuration>
-          <!-- Exclude dev tools from production JAR -->
           <excludeDevtools>true</excludeDevtools>
         </configuration>
       </plugin>
 
-      <!-- Enforce Java 21 compilation -->
+      <!-- Enforce Java 21 compilation with all lint warnings -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
@@ -84,6 +96,36 @@
           <compilerArgs>
             <arg>-Xlint:all</arg>
           </compilerArgs>
+        </configuration>
+      </plugin>
+
+      <!--
+        F5 FIX: OWASP Dependency Check — scans all dependencies for known CVEs.
+        Fails build on CVSS score >= 7.0 (HIGH and CRITICAL).
+        Run manually: mvn dependency-check:check
+        Reports generated at: target/dependency-check-report.html
+      -->
+      <plugin>
+        <groupId>org.owasp</groupId>
+        <artifactId>dependency-check-maven</artifactId>
+        <version>${owasp.version}</version>
+        <configuration>
+          <!-- Fail build on HIGH or CRITICAL CVEs (CVSS >= 7.0) -->
+          <failBuildOnCVSS>7</failBuildOnCVSS>
+          <!-- Skip test-scope dependencies — not deployed to production -->
+          <skipTestScope>true</skipTestScope>
+          <!-- HTML report for readability -->
+          <formats>HTML,JSON</formats>
+        </configuration>
+      </plugin>
+
+      <!-- Dependency version update checks — run: mvn versions:display-dependency-updates -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>versions-maven-plugin</artifactId>
+        <version>2.16.2</version>
+        <configuration>
+          <generateBackupPoms>false</generateBackupPoms>
         </configuration>
       </plugin>
 

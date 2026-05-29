@@ -19,13 +19,14 @@ import org.springframework.context.annotation.Configuration;
  * eliminates AtomicReference race condition from Phase 1.
  *
  * Security:
+ *   - final class — not subclassable, prevents override attacks (F6)
  *   - ManagedIdentityCredential — direct MSI, skips 6-provider chain
  *   - HTTPS enforced by dfs.core.windows.net endpoint
  *   - Config values injected from Azure App Settings via @Value
  *   - Fail-fast: Spring context fails to start if config is missing
  */
 @Configuration
-public class AdlsConfig {
+public final class AdlsConfig {  // F6 FIX: added final — prevents subclassing
 
     private static final Logger LOG = LoggerFactory.getLogger(AdlsConfig.class);
 
@@ -45,8 +46,8 @@ public class AdlsConfig {
         validateConfig(accountName,   "AZURE_STORAGE_ACCOUNT_NAME");
         validateConfig(containerName, "AZURE_STORAGE_CONTAINER_NAME");
 
-        LOG.info("Initializing ADLS client — account: {} container: {}",
-                accountName, containerName);
+        // Log config category only — not specific values (internal infra detail)
+        LOG.info("Initializing ADLS client with Managed Identity...");
 
         // ManagedIdentityCredential — direct MSI token acquisition
         // Significantly faster than DefaultAzureCredential (skips 6-provider chain)
@@ -71,6 +72,10 @@ public class AdlsConfig {
     /**
      * Validates required config value — fails fast at startup.
      * Prevents silent misconfiguration in any environment.
+     *
+     * @param value config value to validate
+     * @param key   config key name — used in error message only
+     * @throws IllegalStateException if value is null or blank
      */
     private static void validateConfig(final String value, final String key) {
         if (value == null || value.isBlank()) {

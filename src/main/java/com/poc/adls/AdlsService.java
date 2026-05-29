@@ -22,28 +22,36 @@ import java.util.regex.Pattern;
  *   - writeGeneratedContent(fileName) → App Service generates content → ADLS Gen2
  *
  * Security controls:
- *   - Path traversal prevention   → strict filename regex allowlist
- *   - File size cap on read       → 10MB hard limit
- *   - Error sanitization          → Bearer/SAS tokens stripped from logs
- *   - Never throws to caller      → always returns TransferResult
- *   - Immutable client            → Spring-managed singleton, thread-safe
+ *   - Log injection prevention  → LogUtils.sanitize() on all user-controlled log values (F1)
+ *   - Path traversal prevention → strict filename regex allowlist
+ *   - File size cap on read     → 10MB hard limit
+ *   - Error sanitization        → Bearer/SAS tokens stripped from logs
+ *   - Never throws to caller    → always returns TransferResult
+ *   - Immutable client          → Spring-managed singleton, thread-safe
+ *   - No broad throws clause    → writeToAdls() does not declare throws Exception (F7)
  */
 @Service
 public final class AdlsService {
 
     private static final Logger LOG = LoggerFactory.getLogger(AdlsService.class);
 
+    // 10 MB read limit — guards against OOM on oversized files
     private static final int MAX_FILE_BYTES    = 10 * 1024 * 1024;
+
+    // 500 char preview — truncates large files in response body
     private static final int MAX_PREVIEW_CHARS = 500;
 
     /**
      * Filename allowlist — alphanumeric, dots, hyphens, underscores only.
      * Must start with alphanumeric. Max 255 chars.
      * Rejects: path traversal (..), directory separators (/ \), null bytes.
+     * Anchored at both ends — no catastrophic backtracking risk.
      */
     private static final Pattern SAFE_FILENAME =
             Pattern.compile("^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$");
 
+    // Spring-managed singleton — injected by AdlsConfig @Bean
+    // Thread-safe: DataLakeFileSystemClient is immutable after construction
     private final DataLakeFileSystemClient fsClient;
 
     public AdlsService(final DataLakeFileSystemClient fsClient) {
@@ -63,45 +71,55 @@ public final class AdlsService {
      * @return TransferResult.success() with content, or TransferResult.failure() with error
      */
     public TransferResult readFile(final String fileName) {
-        LOG.info("Read request — file: {}", fileName);
+        // F1 FIX: sanitize before logging — prevents log injection via newline chars
+        LOG.info("Read request — file: {}", LogUtils.sanitize(fileName));
 
         try {
             validateFileName(fileName);
 
             final DataLakeFileClient fileClient = fsClient.getFileClient(fileName);
 
+            // Lightweight HEAD call — verifies file exists + gets metadata
             final var properties = fileClient.getProperties();
             final long fileSize  = properties.getFileSize();
 
             LOG.info("File found — size: {} bytes", fileSize);
 
+            // Guard: reject files exceeding safe in-memory threshold
+            // Also prevents int cast overflow (fileSize > MAX_FILE_BYTES << Integer.MAX_VALUE)
             if (fileSize > MAX_FILE_BYTES) {
                 return TransferResult.failure(fileName,
                         String.format("File size %d bytes exceeds %d byte limit",
                                 fileSize, MAX_FILE_BYTES));
             }
 
+            // Stream content into bounded output stream
             try (final var outputStream = new ByteArrayOutputStream((int) fileSize)) {
                 fileClient.read(outputStream);
 
                 final byte[] bytes = outputStream.toByteArray();
                 final String content = new String(bytes, StandardCharsets.UTF_8);
 
+                // Safe preview — never return unbounded content in response
                 final String preview = content.length() > MAX_PREVIEW_CHARS
                         ? content.substring(0, MAX_PREVIEW_CHARS) + "...[truncated]"
                         : content;
 
-                LOG.info("Read success — file: {} bytes: {}", fileName, bytes.length);
+                LOG.info("Read success — file: {} bytes: {}",
+                        LogUtils.sanitize(fileName), bytes.length);
                 return TransferResult.success(fileName, bytes.length, preview);
             }
 
         } catch (final IllegalArgumentException ex) {
-            LOG.warn("Read rejected — invalid file name: {} reason: {}", fileName, ex.getMessage());
+            // F1 FIX: sanitize fileName in warn log — file never passed validation
+            LOG.warn("Read rejected — invalid file name: {} reason: {}",
+                    LogUtils.sanitize(fileName), ex.getMessage());
             return TransferResult.failure(fileName, ex.getMessage());
 
         } catch (final Exception ex) {
             final String sanitized = sanitizeError(ex.getMessage());
-            LOG.error("Read failed — file: {} error: {}", fileName, sanitized);
+            LOG.error("Read failed — file: {} error: {}",
+                    LogUtils.sanitize(fileName), sanitized);
             return TransferResult.failure(fileName, sanitized);
         }
     }
@@ -127,7 +145,9 @@ public final class AdlsService {
      * @return TransferResult.written() on success, or TransferResult.failure() with error
      */
     public TransferResult writeGeneratedContent(final String fileName) {
-        LOG.info("Write request — file: {} (ASP-generated content)", fileName);
+        // F1 FIX: sanitize before logging — prevents log injection via newline chars
+        LOG.info("Write request — file: {} (ASP-generated content)",
+                LogUtils.sanitize(fileName));
 
         try {
             validateFileName(fileName);
@@ -155,12 +175,14 @@ public final class AdlsService {
             return writeToAdls(fileName, content);
 
         } catch (final IllegalArgumentException ex) {
-            LOG.warn("Write rejected — invalid file name: {} reason: {}", fileName, ex.getMessage());
+            LOG.warn("Write rejected — invalid file name: {} reason: {}",
+                    LogUtils.sanitize(fileName), ex.getMessage());
             return TransferResult.failure(fileName, ex.getMessage());
 
         } catch (final Exception ex) {
             final String sanitized = sanitizeError(ex.getMessage());
-            LOG.error("Write failed — file: {} error: {}", fileName, sanitized);
+            LOG.error("Write failed — file: {} error: {}",
+                    LogUtils.sanitize(fileName), sanitized);
             return TransferResult.failure(fileName, sanitized);
         }
     }
@@ -172,36 +194,46 @@ public final class AdlsService {
     /**
      * Writes UTF-8 encoded content to ADLS Gen2.
      * Creates file if absent; overwrites if present.
+     *
+     * F7 FIX: No longer declares 'throws Exception' — Azure SDK throws only
+     * unchecked RuntimeExceptions; no checked exceptions are raised here.
+     * Callers wrap in catch(Exception) to handle unchecked SDK exceptions.
      */
-    private TransferResult writeToAdls(
-            final String fileName, final String content) throws Exception {
-
+    private TransferResult writeToAdls(final String fileName, final String content) {
         final byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
         final DataLakeFileClient fileClient = fsClient.getFileClient(fileName);
 
+        // Create or overwrite — true = overwrite existing file
         fileClient.create(true);
 
+        // Append content block starting at offset 0
         try (final var inputStream = new ByteArrayInputStream(bytes)) {
             fileClient.append(inputStream, 0, bytes.length);
         }
 
+        // Flush and commit — makes file immediately readable
         fileClient.flush(bytes.length, true);
 
-        LOG.info("Write success — file: {} bytes: {}", fileName, bytes.length);
+        LOG.info("Write success — file: {} bytes: {}",
+                LogUtils.sanitize(fileName), bytes.length);
         return TransferResult.written(fileName, bytes.length);
     }
 
     /**
      * Validates fileName against strict allowlist.
      * Rejects path traversal, directory separators, null bytes, blank names.
+     *
+     * @throws IllegalArgumentException if fileName is invalid
      */
     private static void validateFileName(final String fileName) {
         if (fileName == null || fileName.isBlank()) {
             throw new IllegalArgumentException("File name must not be blank");
         }
+        // Check for null bytes — defense against null byte injection
         if (fileName.contains("\0")) {
             throw new IllegalArgumentException("File name contains illegal null byte");
         }
+        // Allowlist check — rejects .., /, \, and all other unsafe characters
         if (!SAFE_FILENAME.matcher(fileName).matches()) {
             throw new IllegalArgumentException(
                     "File name contains invalid characters. " +
@@ -220,9 +252,11 @@ public final class AdlsService {
 
     /**
      * Strips token-like patterns from error messages before logging.
+     * Defensive measure against SDK errors containing auth token fragments.
      */
     private static String sanitizeError(final String message) {
         if (message == null) return "Unknown error";
+        // Redact Bearer tokens and SAS query parameters
         return message.replaceAll(
                 "(?i)(bearer|sig|sv|se|sp|sr|st)=[^&\\s]+", "[REDACTED]");
     }
