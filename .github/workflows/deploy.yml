@@ -12,8 +12,8 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
-  id-token: write   # Required for OIDC token generation
-  contents: read    # Required for repo checkout
+  id-token: write
+  contents: read
 
 jobs:
   build:
@@ -33,12 +33,6 @@ jobs:
       - name: Build with Maven
         run: mvn clean package --no-transfer-progress
 
-      # OWASP Dependency Vulnerability Scan
-      # Scans runtime dependencies for known CVEs (CVSS >= 7.0)
-      # continue-on-error: true — non-blocking for PoC
-      # Note: OWASP 9.x requires NVD API key for full database download
-      # Without key it runs in limited mode — report may not generate
-      # Set continue-on-error: false + add NVD_API_KEY secret for production
       - name: OWASP Dependency Check
         run: mvn dependency-check:check --no-transfer-progress
         continue-on-error: true
@@ -48,7 +42,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: owasp-report
-          # OWASP generates HTML and JSON — upload whichever exists
           path: |
             target/dependency-check-report.html
             target/dependency-check-report.json
@@ -84,8 +77,6 @@ jobs:
       - name: Set startup command
         uses: azure/cli@v2
         with:
-          # azcliversion removed — pinning caused action failure
-          # Uses latest stable CLI version bundled with the runner
           inlineScript: |
             az webapp config set \
               --name ${{ env.AZURE_WEBAPP_NAME }} \
@@ -97,3 +88,4 @@ jobs:
         with:
           app-name: ${{ env.AZURE_WEBAPP_NAME }}
           package: target/${{ env.JAR_NAME }}
+          type: jar
