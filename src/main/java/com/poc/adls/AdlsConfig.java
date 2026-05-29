@@ -25,7 +25,7 @@ import org.springframework.context.annotation.Configuration;
  *   - Config values injected from Azure App Settings via @Value
  *   - Fail-fast: Spring context fails to start if config is missing
  */
-@Configuration
+@Configuration(proxyBeanMethods = false)
 public final class AdlsConfig {  // F6 FIX: added final — prevents subclassing
 
     private static final Logger LOG = LoggerFactory.getLogger(AdlsConfig.class);
